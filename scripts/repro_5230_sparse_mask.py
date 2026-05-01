@@ -40,6 +40,22 @@ the reporter's setup (bsz=1, seq=700, hd=3584, vocab=262144, bf16).
 
 import os
 import sys
+
+# unsloth_zoo/__init__.py hard-requires importlib.util.find_spec("unsloth") to
+# return a valid spec. We don't actually use any unsloth API in this repro —
+# only the zoo's fused-CE kernels. Drop a minimal on-disk stub so find_spec
+# sees the package. This is simpler than in-memory module injection, which
+# needs __spec__ set to a ModuleSpec for find_spec to cooperate.
+import importlib.util as _ilu
+if _ilu.find_spec("unsloth") is None:
+    import site, pathlib
+    _sp = pathlib.Path(site.getsitepackages()[0]) / "unsloth"
+    _sp.mkdir(exist_ok=True)
+    (_sp / "__init__.py").write_text(
+        "# stub for repro: unsloth_zoo only checks find_spec('unsloth')\n"
+    )
+    _ilu.invalidate_caches()
+
 import torch
 import torch.nn.functional as F
 

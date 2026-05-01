@@ -108,6 +108,10 @@ echo "=== editable install of unsloth_zoo (no deps) ==="
 # repro and have no wheels on AL2 / older glibc.
 pip install --no-deps -e .
 
+# Note: unsloth_zoo/__init__.py hard-requires find_spec("unsloth") to succeed.
+# The repro script handles this itself by dropping a minimal stub into
+# site-packages on first run.
+
 echo
 echo "=== final environment ==="
 python - <<'PY'
