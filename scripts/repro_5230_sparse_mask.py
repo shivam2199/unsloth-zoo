@@ -41,13 +41,16 @@ the reporter's setup (bsz=1, seq=700, hd=3584, vocab=262144, bf16).
 import os
 import sys
 
-# unsloth_zoo/__init__.py hard-requires importlib.util.find_spec("unsloth") to
-# return a valid spec. We don't use any unsloth API in this repro — only the
-# zoo's fused-CE kernels. Drop a minimal stub in a local dir and prepend it
-# to sys.path so the zoo's import guard passes without needing the real
-# unsloth package (which drags bitsandbytes + other heavy deps).
-import importlib
-import importlib.util as _ilu
+# unsloth_zoo/__init__.py has two guards:
+#   line 94:  find_spec("unsloth") must succeed
+#   line 278: os.environ["UNSLOTH_IS_PRESENT"] must be set
+# The second is normally set by `import unsloth` running first, but we don't
+# want to pull in the full unsloth package + its heavy deps. Set it manually
+# — we only need the zoo's fused-CE kernels for this repro.
+os.environ["UNSLOTH_IS_PRESENT"] = "1"
+
+# Also satisfy the find_spec guard if the real unsloth isn't pip-installed.
+import importlib, importlib.util as _ilu
 if _ilu.find_spec("unsloth") is None:
     _here = os.path.dirname(os.path.abspath(__file__))
     _stub_root = os.path.join(_here, "_stub")
@@ -58,7 +61,6 @@ if _ilu.find_spec("unsloth") is None:
     if _stub_root not in sys.path:
         sys.path.insert(0, _stub_root)
     importlib.invalidate_caches()
-    assert _ilu.find_spec("unsloth") is not None, "stub failed — check _stub/ dir"
 
 import torch
 import torch.nn.functional as F
