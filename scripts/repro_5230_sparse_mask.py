@@ -121,12 +121,20 @@ def grad_stats(g):
     )
 
 
-def run_reference(hidden_states, lm_head_weight, labels):
-    # Plain HF CE path (what UNSLOTH_RETURN_LOGITS=1 falls back to, modulo
-    # scaling / softcap). Used as the ground-truth gradient.
+def run_reference(hidden_states, lm_head_weight, labels,
+                  logit_scale_multiply=0, logit_softcapping=0):
+    # Plain HF CE path with optional Gemma-style scaling / softcap applied
+    # before the CE. Used as the ground-truth gradient for the configured
+    # (scale, softcap) pair.
     h = hidden_states.float()
     W = lm_head_weight.float()
     logits = F.linear(h, W)
+    if logit_scale_multiply:
+        logits = logits * logit_scale_multiply
+    if logit_softcapping:
+        logits = logits / logit_softcapping
+        logits = torch.tanh(logits)
+        logits = logits * logit_softcapping
     shift_logits = logits[:, :-1, :].contiguous().view(-1, VOCAB_SIZE)
     shift_labels = labels[:, 1:].contiguous().view(-1)
     n_items = (shift_labels != -100).sum().clamp(min=1)
@@ -135,7 +143,9 @@ def run_reference(hidden_states, lm_head_weight, labels):
     return loss.detach(), hidden_states.grad.detach().clone()
 
 
-def run_unsloth_fused(hidden_states, lm_head_weight, labels, torch_compile=True):
+def run_unsloth_fused(hidden_states, lm_head_weight, labels,
+                      torch_compile=True, logit_scale_multiply=0,
+                      logit_softcapping=0):
     from unsloth_zoo.fused_losses import unsloth_fused_ce_loss
     n_items = (labels[..., 1:] != -100).sum().clamp(min=1)
     loss = unsloth_fused_ce_loss(
@@ -148,23 +158,45 @@ def run_unsloth_fused(hidden_states, lm_head_weight, labels, torch_compile=True)
         n_items=n_items,
         scaling=None,
         torch_compile=torch_compile,
+        logit_scale_multiply=logit_scale_multiply,
+        logit_softcapping=logit_softcapping,
     )
     loss.backward()
     return loss.detach(), hidden_states.grad.detach().clone()
 
 
 def run_unsloth_fused_compiled(hidden_states, lm_head_weight, labels):
-    # Exercise the Inductor-compiled chunk path (what the reporter hits in
-    # production — zoo calls with torch_compile=True by default in the
-    # compiler.py rewrites at cross_entropy_replacement_1:1557).
     return run_unsloth_fused(hidden_states, lm_head_weight, labels, torch_compile=True)
 
 
 def run_unsloth_fused_eager(hidden_states, lm_head_weight, labels):
-    # Control: same kernel without Inductor. If compiled breaks but eager
-    # doesn't, the bug is in the @torch.compile wrapper, not the autograd
-    # Function itself.
     return run_unsloth_fused(hidden_states, lm_head_weight, labels, torch_compile=False)
+
+
+# Gemma-4 actually uses these — we suspect one triggers the bug.
+# gemma-4-26B-A4B-it config.json: final_logit_softcapping = 30.0
+# lm_head_multiplier is applied by Gemma-4 as a pre-lm_head scale;
+# when the compiler rewrite captures it, it comes through as
+# logit_scale_multiply. Guess range: 7.8125 (common Gemma) or 1.0.
+def run_gemma4_softcap(hidden_states, lm_head_weight, labels):
+    return run_unsloth_fused(
+        hidden_states, lm_head_weight, labels,
+        torch_compile=True, logit_softcapping=30.0,
+    )
+
+
+def run_gemma4_lm_mult(hidden_states, lm_head_weight, labels):
+    return run_unsloth_fused(
+        hidden_states, lm_head_weight, labels,
+        torch_compile=True, logit_scale_multiply=7.8125,
+    )
+
+
+def run_gemma4_both(hidden_states, lm_head_weight, labels):
+    return run_unsloth_fused(
+        hidden_states, lm_head_weight, labels,
+        torch_compile=True, logit_scale_multiply=7.8125, logit_softcapping=30.0,
+    )
 
 
 def run_cce(hidden_states, lm_head_weight, labels):
@@ -188,10 +220,13 @@ def run_cce(hidden_states, lm_head_weight, labels):
 
 
 PATHS = [
-    ("reference_hf_ce", run_reference),
-    ("unsloth_fused_ce_loss  compiled (prod default)", run_unsloth_fused_compiled),
-    ("unsloth_fused_ce_loss  eager    (control)",     run_unsloth_fused_eager),
-    ("cut_cross_entropy via fused_linear_cross_entropy", run_cce),
+    # (name, kernel_fn, (logit_scale_multiply, logit_softcapping))
+    ("unsloth_fused  compiled  plain",            run_unsloth_fused_compiled, (0, 0)),
+    ("unsloth_fused  eager     plain",            run_unsloth_fused_eager,    (0, 0)),
+    ("unsloth_fused  compiled  +softcap=30",      run_gemma4_softcap,         (0, 30.0)),
+    ("unsloth_fused  compiled  +scale=7.8125",    run_gemma4_lm_mult,         (7.8125, 0)),
+    ("unsloth_fused  compiled  +both (gemma-4)",  run_gemma4_both,            (7.8125, 30.0)),
+    ("cut_cross_entropy",                         run_cce,                    (0, 0)),
 ]
 
 
@@ -203,42 +238,46 @@ def main():
     print(f"bsz={BSZ}  seq_len={SEQ_LEN}  hd={HIDDEN_DIM}  vocab={VOCAB_SIZE}  dtype={DTYPE}")
     print()
 
-    # Cache reference grads per regime so we can compare.
-    ref_cache = {}
-
     for regime_name, ratio in SPARSITY_REGIMES:
         print(f"=== regime {regime_name}  trainable_ratio={ratio:.4f} ===")
         h_ref, W_ref, y_ref = make_inputs(ratio)
         n_train = int((y_ref[..., 1:] != -100).sum().item())
         print(f"    trainable tokens (after shift): {n_train} / {BSZ * (SEQ_LEN - 1)}")
 
-        try:
-            ref_loss, ref_grad = run_reference(h_ref, W_ref, y_ref)
-            ref_cache[regime_name] = (ref_loss, ref_grad)
-        except Exception as e:
-            print(f"    reference FAILED: {type(e).__name__}: {e}")
-            continue
+        # Cache references keyed by (scale, softcap) so we don't recompute.
+        ref_cache_regime = {}
 
-        for path_name, path_fn in PATHS:
-            if path_fn is run_reference:
-                print(f"    [{path_name:<60}] loss={ref_loss.item():.4f}  {grad_stats(ref_grad)}")
-                continue
-            # Fresh inputs per path (grad accumulates otherwise).
+        for path_name, path_fn, (scale, softcap) in PATHS:
+            # Build a matching reference for this (scale, softcap) pair.
+            if (scale, softcap) not in ref_cache_regime:
+                h, W, y = make_inputs(ratio)
+                try:
+                    _, ref_g = run_reference(
+                        h, W, y,
+                        logit_scale_multiply=scale, logit_softcapping=softcap,
+                    )
+                    ref_cache_regime[(scale, softcap)] = ref_g
+                except Exception as e:
+                    print(f"    reference({scale},{softcap}) FAILED: {e}")
+                    continue
+
+            ref_grad = ref_cache_regime[(scale, softcap)]
+
+            # Run the kernel being tested.
             h, W, y = make_inputs(ratio)
             try:
                 loss, g = path_fn(h, W, y)
-                # Cosine against reference for non-zero ref.
-                ref_flat = ref_cache[regime_name][1].float().flatten()
+                ref_flat = ref_grad.float().flatten()
                 g_flat = g.float().flatten()
                 denom = (ref_flat.norm() * g_flat.norm()).clamp(min=1e-12)
                 cos = (ref_flat @ g_flat / denom).item()
                 rel = (g_flat - ref_flat).norm().item() / ref_flat.norm().clamp(min=1e-12).item()
                 print(
-                    f"    [{path_name:<60}] loss={loss.item():.4f}  "
+                    f"    [{path_name:<48}] loss={loss.item():+.4f}  "
                     f"{grad_stats(g)}  cos_vs_ref={cos:+.4f}  rel_err={rel:.3e}"
                 )
             except Exception as e:
-                print(f"    [{path_name:<60}] FAILED: {type(e).__name__}: {e}")
+                print(f"    [{path_name:<48}] FAILED: {type(e).__name__}: {e}")
         print()
 
 
