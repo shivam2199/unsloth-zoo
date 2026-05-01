@@ -75,10 +75,17 @@ pip install --index-url https://download.pytorch.org/whl/cu121 torch
 
 echo
 echo "=== core deps for the repro ==="
+# Only the packages the repro actually imports. Skipping the full zoo dep
+# tree (datasets, libcst, pyarrow, etc.) which has no prebuilt wheels on
+# older glibc / Amazon Linux 2 and would fail to build from source.
 pip install \
     transformers \
     cut-cross-entropy \
-    numpy
+    numpy \
+    packaging \
+    protobuf \
+    sentencepiece \
+    triton
 
 echo
 echo "=== clone fork + switch to fix branch ==="
@@ -95,8 +102,10 @@ git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH" "origin/$BRANCH"
 git pull origin "$BRANCH" --rebase || true
 
 echo
-echo "=== editable install of unsloth_zoo ==="
-pip install -e .
+echo "=== editable install of unsloth_zoo (no deps) ==="
+# --no-deps skips libcst/pyarrow/datasets which aren't needed for the kernel
+# repro and have no wheels on AL2 / older glibc.
+pip install --no-deps -e .
 
 echo
 echo "=== final environment ==="
