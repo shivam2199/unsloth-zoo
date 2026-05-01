@@ -155,15 +155,17 @@ def run_unsloth_fused(hidden_states, lm_head_weight, labels):
 
 def run_cce(hidden_states, lm_head_weight, labels):
     # Path taken when NOT_RETURN_LOGITS and not requires_grad_ (LoRA default).
+    # Matches the exact call at compiler.py cross_entropy_replacement_1:1527 —
+    # passes unshifted hidden_states + labels. fused_linear_cross_entropy
+    # forwards shift=True to cut_cross_entropy.linear_cross_entropy which
+    # handles alignment internally. Do NOT pre-shift here — that would
+    # double-shift and corrupt gradients.
     from unsloth_zoo.loss_utils import fused_linear_cross_entropy
     n_items = (labels[..., 1:] != -100).sum().clamp(min=1)
-    # Matches the call in compiler.py cross_entropy_replacement_1.
-    shift_hidden = hidden_states[:, :-1, :].contiguous()
-    shift_labels = labels[:, 1:].contiguous()
     loss = fused_linear_cross_entropy(
-        hidden_states=shift_hidden,
+        hidden_states=hidden_states,
         lm_weight=lm_head_weight,
-        labels=shift_labels,
+        labels=labels,
         num_items_in_batch=n_items,
         logit_softcapping=0,
     )
