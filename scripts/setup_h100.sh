@@ -76,16 +76,17 @@ pip install --index-url https://download.pytorch.org/whl/cu121 torch
 echo
 echo "=== core deps for the repro ==="
 # Only the packages the repro actually imports. Skipping the full zoo dep
-# tree (datasets, libcst, pyarrow, etc.) which has no prebuilt wheels on
-# older glibc / Amazon Linux 2 and would fail to build from source.
-pip install \
-    transformers \
-    cut-cross-entropy \
-    numpy \
-    packaging \
-    protobuf \
-    sentencepiece \
-    triton
+# tree (datasets, libcst, pyarrow, sentencepiece, etc.) which has no
+# prebuilt wheels on older glibc / Amazon Linux 2 and would fail to build
+# from source (no rust, no cmake). The repro does not load any tokenizer
+# or dataset, so none of those are needed.
+#
+# transformers is needed because unsloth_zoo/loss_utils.py imports
+# transformers.training_args at module load. Installed with --no-deps so
+# pip doesn't drag sentencepiece/tokenizers/etc.
+pip install numpy packaging filelock pyyaml regex requests tqdm huggingface-hub safetensors
+pip install --no-deps transformers
+pip install cut-cross-entropy
 
 echo
 echo "=== clone fork + switch to fix branch ==="
