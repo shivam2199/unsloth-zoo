@@ -42,20 +42,23 @@ import os
 import sys
 
 # unsloth_zoo/__init__.py hard-requires importlib.util.find_spec("unsloth") to
-# return a valid spec. We don't actually use any unsloth API in this repro —
-# only the zoo's fused-CE kernels. Drop a minimal on-disk stub so find_spec
-# sees the package. This is simpler than in-memory module injection, which
-# needs __spec__ set to a ModuleSpec for find_spec to cooperate.
+# return a valid spec. We don't use any unsloth API in this repro — only the
+# zoo's fused-CE kernels. Drop a minimal stub in a local dir and prepend it
+# to sys.path so the zoo's import guard passes without needing the real
+# unsloth package (which drags bitsandbytes + other heavy deps).
 import importlib
 import importlib.util as _ilu
 if _ilu.find_spec("unsloth") is None:
-    import site, pathlib
-    _sp = pathlib.Path(site.getsitepackages()[0]) / "unsloth"
-    _sp.mkdir(exist_ok=True)
-    (_sp / "__init__.py").write_text(
-        "# stub for repro: unsloth_zoo only checks find_spec('unsloth')\n"
-    )
+    _here = os.path.dirname(os.path.abspath(__file__))
+    _stub_root = os.path.join(_here, "_stub")
+    _stub_pkg = os.path.join(_stub_root, "unsloth")
+    os.makedirs(_stub_pkg, exist_ok=True)
+    with open(os.path.join(_stub_pkg, "__init__.py"), "w") as f:
+        f.write("# stub: unsloth_zoo only checks find_spec('unsloth')\n")
+    if _stub_root not in sys.path:
+        sys.path.insert(0, _stub_root)
     importlib.invalidate_caches()
+    assert _ilu.find_spec("unsloth") is not None, "stub failed — check _stub/ dir"
 
 import torch
 import torch.nn.functional as F
