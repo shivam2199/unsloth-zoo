@@ -135,7 +135,7 @@ def run_reference(hidden_states, lm_head_weight, labels):
     return loss.detach(), hidden_states.grad.detach().clone()
 
 
-def run_unsloth_fused(hidden_states, lm_head_weight, labels):
+def run_unsloth_fused(hidden_states, lm_head_weight, labels, torch_compile=True):
     from unsloth_zoo.fused_losses import unsloth_fused_ce_loss
     n_items = (labels[..., 1:] != -100).sum().clamp(min=1)
     loss = unsloth_fused_ce_loss(
@@ -147,10 +147,24 @@ def run_unsloth_fused(hidden_states, lm_head_weight, labels):
         mask=None,
         n_items=n_items,
         scaling=None,
-        torch_compile=False,
+        torch_compile=torch_compile,
     )
     loss.backward()
     return loss.detach(), hidden_states.grad.detach().clone()
+
+
+def run_unsloth_fused_compiled(hidden_states, lm_head_weight, labels):
+    # Exercise the Inductor-compiled chunk path (what the reporter hits in
+    # production — zoo calls with torch_compile=True by default in the
+    # compiler.py rewrites at cross_entropy_replacement_1:1557).
+    return run_unsloth_fused(hidden_states, lm_head_weight, labels, torch_compile=True)
+
+
+def run_unsloth_fused_eager(hidden_states, lm_head_weight, labels):
+    # Control: same kernel without Inductor. If compiled breaks but eager
+    # doesn't, the bug is in the @torch.compile wrapper, not the autograd
+    # Function itself.
+    return run_unsloth_fused(hidden_states, lm_head_weight, labels, torch_compile=False)
 
 
 def run_cce(hidden_states, lm_head_weight, labels):
@@ -175,8 +189,9 @@ def run_cce(hidden_states, lm_head_weight, labels):
 
 PATHS = [
     ("reference_hf_ce", run_reference),
-    ("unsloth_fused_ce_loss (RETURN_LOGITS=1 fallback family)", run_unsloth_fused),
-    ("cut_cross_entropy via fused_linear_cross_entropy (default)", run_cce),
+    ("unsloth_fused_ce_loss  compiled (prod default)", run_unsloth_fused_compiled),
+    ("unsloth_fused_ce_loss  eager    (control)",     run_unsloth_fused_eager),
+    ("cut_cross_entropy via fused_linear_cross_entropy", run_cce),
 ]
 
 
