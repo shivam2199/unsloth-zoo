@@ -28,12 +28,41 @@ nvidia-smi || { echo "No GPU detected"; exit 1; }
 
 echo
 echo "=== system packages ==="
-sudo apt-get update -qq
-sudo apt-get install -y -qq python3-venv python3-pip git build-essential
+# Minimal CUDA containers (RunPod/Vast) often lack apt but already have
+# python3, git, gcc. Only try to install if apt-get exists AND something's
+# actually missing.
+need_pkgs=()
+command -v python3 >/dev/null || need_pkgs+=(python3-venv python3-pip)
+command -v git     >/dev/null || need_pkgs+=(git)
+command -v gcc     >/dev/null || need_pkgs+=(build-essential)
+
+if [ ${#need_pkgs[@]} -eq 0 ]; then
+    echo "python3, git, gcc already present — skipping apt"
+elif command -v apt-get >/dev/null; then
+    SUDO=""
+    [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null && SUDO="sudo"
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y -qq "${need_pkgs[@]}"
+else
+    echo "MISSING: ${need_pkgs[*]} and no apt-get available."
+    echo "Install them via your image's package manager and re-run."
+    exit 1
+fi
+
+# venv module may be absent even when python3 is present (e.g. slim images).
+if ! python3 -c "import venv" 2>/dev/null; then
+    echo "python3-venv not available; using plain virtualenv instead"
+    python3 -m pip install --user virtualenv
+    USE_VIRTUALENV=1
+fi
 
 echo
 echo "=== fresh venv at $VENV_DIR ==="
-python3 -m venv "$VENV_DIR"
+if [ "${USE_VIRTUALENV:-0}" = "1" ]; then
+    python3 -m virtualenv "$VENV_DIR"
+else
+    python3 -m venv "$VENV_DIR"
+fi
 # shellcheck disable=SC1090
 source "$VENV_DIR/bin/activate"
 pip install --upgrade pip wheel setuptools
