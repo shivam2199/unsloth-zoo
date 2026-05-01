@@ -46,6 +46,7 @@ import sys
 # only the zoo's fused-CE kernels. Drop a minimal on-disk stub so find_spec
 # sees the package. This is simpler than in-memory module injection, which
 # needs __spec__ set to a ModuleSpec for find_spec to cooperate.
+import importlib
 import importlib.util as _ilu
 if _ilu.find_spec("unsloth") is None:
     import site, pathlib
@@ -54,7 +55,7 @@ if _ilu.find_spec("unsloth") is None:
     (_sp / "__init__.py").write_text(
         "# stub for repro: unsloth_zoo only checks find_spec('unsloth')\n"
     )
-    _ilu.invalidate_caches()
+    importlib.invalidate_caches()
 
 import torch
 import torch.nn.functional as F
